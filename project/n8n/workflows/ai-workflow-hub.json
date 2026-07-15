@@ -1,0 +1,260 @@
+{
+  "name": "AI Workflow Hub - Daily Data Aggregation",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "position": [250, 300],
+      "typeVersion": 1,
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 9 * * *" }]
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "position": [250, 500],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "options": {},
+        "path": "ai-workflow-hub"
+      },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "position": [250, 700],
+      "typeVersion": 1,
+      "webhookId": "ai-workflow-hub"
+    },
+    {
+      "parameters": {
+        "jsCode": "const workflowData = {\n  workflow_name: 'AI Workflow Hub - Daily Data Aggregation',\n  trigger_type: $node['Schedule Trigger'].json ? 'scheduled' : ($node['Manual Trigger'].json ? 'manual' : 'webhook'),\n  started_at: new Date().toISOString(),\n  status: 'running'\n};\n\nawait $webhook.post({\n  url: 'http://backend:8000/api/v1/webhooks/trigger-workflow',\n  data: workflowData\n});\n\nreturn workflowData;"
+      },
+      "name": "Initialize Execution",
+      "type": "n8n-nodes-base.code",
+      "position": [450, 300],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "jsCode": "const notifications = await $webhook.post({\n  url: 'http://backend:8000/api/v1/notify/slack',\n  data: {\n    message: `Workflow 'AI Workflow Hub' started execution.`\n  }\n});\n\nreturn { notifications_sent: true };"
+      },
+      "name": "Notify Started",
+      "type": "n8n-nodes-base.code",
+      "position": [650, 300],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "url": "https://newsapi.org/v2/top-headlines",
+        "options": {
+          "qs": {
+            "country": "us",
+            "pageSize": 5,
+            "apiKey": "={{ $env.NEWS_API_KEY }}"
+          }
+        }
+      },
+      "name": "Fetch News",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [850, 200],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "url": "https://api.openweathermap.org/data/2.5/weather",
+        "options": {
+          "qs": {
+            "q": "London",
+            "appid": "={{ $env.WEATHER_API_KEY }}",
+            "units": "metric"
+          }
+        }
+      },
+      "name": "Fetch Weather",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [850, 350],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "url": "https://api.exchangerate-api.com/v4/latest/USD",
+        "options": {}
+      },
+      "name": "Fetch Exchange Rates",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [850, 500],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "url": "https://api.github.com/search/repositories",
+        "options": {
+          "qs": {
+            "q": "stars:>1000",
+            "sort": "stars",
+            "order": "desc",
+            "per_page": 5
+          },
+          "headers": {
+            "Accept": "application/vnd.github.v3+json"
+          }
+        }
+      },
+      "name": "Fetch GitHub Trending",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [850, 650],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "jsCode": "const allData = $input.all();\n\nconst merged = {\n  sources: [],\n  data: {},\n  fetched_at: new Date().toISOString()\n};\n\nfor (const item of allData) {\n  const source = item.json.source || item.json.url || 'unknown';\n  merged.sources.push(source);\n  merged.data[source] = item.json;\n}\n\n// Store raw data to backend\nawait $webhook.post({\n  url: 'http://backend:8000/api/v1/webhooks/n8n/data-fetched',\n  data: merged\n});\n\nreturn merged;"
+      },
+      "name": "Merge Data",
+      "type": "n8n-nodes-base.code",
+      "position": [1050, 300],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\n// Remove null/undefined values\nfunction cleanNulls(obj) {\n  if (typeof obj !== 'object' || obj === null) return obj;\n  if (Array.isArray(obj)) return obj.map(cleanNulls).filter(item => item !== null && item !== undefined);\n  \n  const cleaned = {};\n  for (const [key, value] of Object.entries(obj)) {\n    if (value !== null && value !== undefined) {\n      cleaned[key] = cleanNulls(value);\n    }\n  }\n  return cleaned;\n}\n\n// Convert timestamps to ISO\nfunction convertTimestamps(obj) {\n  if (typeof obj !== 'object' || obj === null) return obj;\n  if (Array.isArray(obj)) return obj.map(convertTimestamps);\n  \n  const converted = {};\n  for (const [key, value] of Object.entries(obj)) {\n    if (typeof value === 'string' && /^\\d{4}-\\d{2}-\\d{2}T/.test(value)) {\n      converted[key] = new Date(value).toISOString();\n    } else if (typeof value === 'number' && key.includes('timestamp') || key.includes('date')) {\n      converted[key] = new Date(value * 1000).toISOString();\n    } else {\n      converted[key] = convertTimestamps(value);\n    }\n  }\n  return converted;\n}\n\nlet cleaned = cleanNulls(data);\ncleaned = convertTimestamps(cleaned);\ncleaned.processed_at = new Date().toISOString();\n\nreturn cleaned;"
+      },
+      "name": "Clean & Transform",
+      "type": "n8n-nodes-base.code",
+      "position": [1250, 300],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst prompt = `Summarize the following data concisely, highlighting key insights:\n\nSources: ${data.sources.join(', ')}\n\nData: ${JSON.stringify(data.data, null, 2).substring(0, 3000)}`;\n\nreturn { prompt, data };"
+      },
+      "name": "Prepare AI Prompt",
+      "type": "n8n-nodes-base.code",
+      "position": [1450, 200],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "options": {},
+        "model": "gpt-4o",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a senior data analyst. Generate a structured summary with key insights, trends, and recommendations."
+            },
+            {
+              "role": "user",
+              "content": "={{ $json.prompt }}"
+            }
+          ]
+        }
+      },
+      "name": "AI Summary (GPT-4o)",
+      "type": "n8n-nodes-base.openAi",
+      "position": [1650, 200],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "jsCode": "const aiOutput = $input.first().json;\n\nawait $webhook.post({\n  url: 'http://backend:8000/api/v1/webhooks/n8n/ai-output',\n  data: {\n    execution_id: $node['Initialize Execution'].json.execution_id,\n    prompt_type: 'summarize',\n    model: 'gpt-4o',\n    input_tokens: aiOutput.usage?.prompt_tokens || 0,\n    output_tokens: aiOutput.usage?.completion_tokens || 0,\n    output_content: aiOutput.message?.content || '',\n    input_summary: $node['Prepare AI Prompt'].json.prompt?.substring(0, 500) || ''\n  }\n});\n\nreturn aiOutput;"
+      },
+      "name": "Store AI Output",
+      "type": "n8n-nodes-base.code",
+      "position": [1850, 200],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "jsCode": "const aiContent = $input.first().json.message?.content || '';\nconst mergedData = $node['Merge Data'].json;\n\nconst now = new Date();\nconst row = [\n  now.toISOString().split('T')[0],\n  mergedData.sources?.join('; ') || 'multiple',\n  aiContent.substring(0, 200),\n  aiContent.substring(0, 500),\n  'completed'\n];\n\nreturn { row, aiContent };"
+      },
+      "name": "Prepare Sheet Row",
+      "type": "n8n-nodes-base.code",
+      "position": [2050, 100],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $input.first().json.row;\n\nawait $webhook.post({\n  url: 'http://backend:8000/api/v1/sheets/append',\n  data: row\n});\n\nreturn { appended: true };"
+      },
+      "name": "Append to Google Sheets",
+      "type": "n8n-nodes-base.code",
+      "position": [2250, 100],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "jsCode": "const aiContent = $input.first().json.aiContent;\nconst sources = $node['Merge Data'].json.sources;\n\nconst emailBody = `\n<h2>AI Workflow Hub - Daily Report</h2>\n<p><strong>Date:</strong> ${new Date().toISOString().split('T')[0]}</p>\n<p><strong>Data Sources:</strong> ${sources.join(', ')}</p>\n<h3>AI Summary</h3>\n<p>${aiContent.replace(/\\n/g, '<br>')}</p>\n<h3>Top Insights</h3>\n<ul>\n<li>Data aggregated from ${sources.length} sources</li>\n<li>Processed and analyzed using GPT-4o</li>\n<li>All results stored in database</li>\n</ul>\n<p><strong>Status:</strong> Completed</p>\n`;\n\nawait $webhook.post({\n  url: 'http://backend:8000/api/v1/notify/email',\n  data: {\n    to: $env.REPORT_EMAIL || 'user@example.com',\n    subject: `AI Workflow Report - ${new Date().toISOString().split('T')[0]}`,\n    body: emailBody\n  }\n});\n\nreturn { email_sent: true };"
+      },
+      "name": "Send Email Report",
+      "type": "n8n-nodes-base.code",
+      "position": [2250, 250],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "jsCode": "const message = `\n*AI Workflow Hub - Daily Execution Summary*\n\\n*Status:* Completed ✅\\n*Date:* ${new Date().toISOString().split('T')[0]}\\n*Sources:* ${$node['Merge Data'].json.sources?.join(', ') || 'N/A'}\\n\\nWorkflow has completed successfully. All data has been processed, stored, and reported.`;\n\nawait $webhook.post({\n  url: 'http://backend:8000/api/v1/notify/slack',\n  data: { message }\n});\n\nreturn { slack_notified: true };"
+      },
+      "name": "Send Slack Notification",
+      "type": "n8n-nodes-base.code",
+      "position": [2250, 400],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "jsCode": "const executionData = $node['Initialize Execution'].json;\n\nawait $webhook.post({\n  url: 'http://backend:8000/api/v1/webhooks/n8n/workflow-completed',\n  data: {\n    execution_id: executionData.execution_id,\n    workflow_name: 'AI Workflow Hub - Daily Data Aggregation',\n    status: 'completed',\n    trigger_type: executionData.trigger_type,\n    duration_ms: new Date() - new Date(executionData.started_at),\n    completed_at: new Date().toISOString()\n  }\n});\n\nreturn { completed: true };"
+      },
+      "name": "Finalize & Log",
+      "type": "n8n-nodes-base.code",
+      "position": [2450, 300],
+      "typeVersion": 1
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": { "main": [[ { "node": "Initialize Execution", "type": "main" } ]] },
+    "Manual Trigger": { "main": [[ { "node": "Initialize Execution", "type": "main" } ]] },
+    "Webhook": { "main": [[ { "node": "Initialize Execution", "type": "main" } ]] },
+    "Initialize Execution": { "main": [[ { "node": "Notify Started", "type": "main" } ]] },
+    "Notify Started": {
+      "main": [
+        [
+          { "node": "Fetch News", "type": "main" },
+          { "node": "Fetch Weather", "type": "main" },
+          { "node": "Fetch Exchange Rates", "type": "main" },
+          { "node": "Fetch GitHub Trending", "type": "main" }
+        ]
+      ]
+    },
+    "Fetch News": { "main": [[ { "node": "Merge Data", "type": "main" } ]] },
+    "Fetch Weather": { "main": [[ { "node": "Merge Data", "type": "main" } ]] },
+    "Fetch Exchange Rates": { "main": [[ { "node": "Merge Data", "type": "main" } ]] },
+    "Fetch GitHub Trending": { "main": [[ { "node": "Merge Data", "type": "main" } ]] },
+    "Merge Data": { "main": [[ { "node": "Clean & Transform", "type": "main" } ]] },
+    "Clean & Transform": { "main": [[ { "node": "Prepare AI Prompt", "type": "main" } ]] },
+    "Prepare AI Prompt": { "main": [[ { "node": "AI Summary (GPT-4o)", "type": "main" } ]] },
+    "AI Summary (GPT-4o)": { "main": [[ { "node": "Store AI Output", "type": "main" } ]] },
+    "Store AI Output": {
+      "main": [
+        [
+          { "node": "Prepare Sheet Row", "type": "main" },
+          { "node": "Send Email Report", "type": "main" },
+          { "node": "Send Slack Notification", "type": "main" }
+        ]
+      ]
+    },
+    "Prepare Sheet Row": { "main": [[ { "node": "Append to Google Sheets", "type": "main" } ]] },
+    "Append to Google Sheets": { "main": [[ { "node": "Finalize & Log", "type": "main" } ]] },
+    "Send Email Report": { "main": [[ { "node": "Finalize & Log", "type": "main" } ]] },
+    "Send Slack Notification": { "main": [[ { "node": "Finalize & Log", "type": "main" } ]] }
+  },
+  "active": true,
+  "settings": {},
+  "staticData": null,
+  "tags": ["ai", "automation", "daily", "aggregation"]
+}

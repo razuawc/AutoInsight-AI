@@ -1,0 +1,201 @@
+version: "3.9"
+
+services:
+  # ============================================================
+  # PostgreSQL Database
+  # ============================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai-postgres
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aihub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aihub_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_workflow_hub}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aihub -d ai_workflow_hub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aihub-network
+
+  # ============================================================
+  # Redis Cache & Queue
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: ai-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_secret}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aihub-network
+
+  # ============================================================
+  # n8n Workflow Automation
+  # ============================================================
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: ai-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    volumes:
+      - ./n8n/workflows:/home/node/.n8n/workflows
+      - ./n8n/credentials:/home/node/.n8n/credentials
+      - ./n8n/custom-nodes:/home/node/.n8n/custom
+      - n8n_data:/home/node/.n8n
+    environment:
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_METRICS: "true"
+      N8N_METRICS_INCLUDE_DEFAULT_METRICS: "true"
+      N8N_PAYLOAD_SIZE_MAX: 16
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: 168
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-ai_workflow_hub}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-aihub}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-aihub_secret}
+      DB_POSTGRESDB_CONNECTION_LIMIT: 10
+      N8N_METRICS_PREFIX: n8n_
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aihub-network
+
+  # ============================================================
+  # FastAPI Backend
+  # ============================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./scripts:/app/scripts
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aihub}:${POSTGRES_PASSWORD:-aihub_secret}@postgres:5432/${POSTGRES_DB:-ai_workflow_hub}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      SECRET_KEY: ${SECRET_KEY}
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      GMAIL_USER: ${GMAIL_USER}
+      GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD}
+      GOOGLE_SHEETS_CREDENTIALS: ${GOOGLE_SHEETS_CREDENTIALS}
+      GOOGLE_SHEETS_SPREADSHEET_ID: ${GOOGLE_SHEETS_SPREADSHEET_ID}
+      N8N_WEBHOOK_URL: http://n8n:5678
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:8000}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aihub-network
+
+  # ============================================================
+  # Prometheus Monitoring
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ai-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    depends_on:
+      - backend
+    networks:
+      - aihub-network
+
+  # ============================================================
+  # Grafana Dashboards
+  # ============================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ai-grafana
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    depends_on:
+      - prometheus
+    networks:
+      - aihub-network
+
+  # ============================================================
+  # pgAdmin (Optional - DB Management)
+  # ============================================================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: ai-pgadmin
+    restart: unless-stopped
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@aihub.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    networks:
+      - aihub-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  n8n_data:
+  prometheus_data:
+  grafana_data:
+  pgadmin_data:
+
+networks:
+  aihub-network:
+    driver: bridge

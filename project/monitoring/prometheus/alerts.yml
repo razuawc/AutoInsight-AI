@@ -1,0 +1,48 @@
+groups:
+  - name: ai-workflow-alerts
+    interval: 30s
+    rules:
+      - alert: BackendDown
+        expr: up{job="ai-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AI Backend is down"
+          description: "The FastAPI backend has been unreachable for over 1 minute."
+
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High HTTP error rate"
+          description: "Error rate is above 10% for the last 5 minutes."
+
+      - alert: ExecutionFailureRate
+        expr: rate(workflow_executions_failed_total[15m]) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High workflow failure rate"
+          description: "Workflow execution failure rate is above 20%."
+
+      - alert: SlowResponses
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow API responses"
+          description: "95th percentile response time is above 2 seconds."
+
+      - alert: DatabaseConnectionPoolExhausted
+        expr: pg_pool_available_connections == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database connection pool exhausted"
+          description: "No available database connections."
